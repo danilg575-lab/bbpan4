@@ -1,10 +1,11 @@
 const express = require('express');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 const fetch = require('node-fetch');
+const HttpsProxyAgent = require('https-proxy-agent');
 const app = express();
 
 app.use(express.json());
 
+// Генерация traceparent (стандарт W3C)
 function generateTraceparent() {
     const version = '00';
     const traceId = require('crypto').randomBytes(16).toString('hex');
@@ -13,34 +14,21 @@ function generateTraceparent() {
     return `${version}-${traceId}-${parentId}-${flags}`;
 }
 
-function parseProxyString(proxyStr) {
-    // Формат из файла: host:port:user:pass
-    const parts = proxyStr.split(':');
-    if (parts.length === 4) {
-        return {
-            host: parts[0],
-            port: parts[1],
-            username: parts[2],
-            password: parts[3]
-        };
-    }
-    return null;
-}
-
+// Функция для выполнения запроса с поддержкой прокси
 async function makeRequest(url, method, body = null, cookieString = '', proxy = null, extraHeaders = {}) {
     const headers = {
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
         'content-type': 'application/json',
-        'origin': 'https://www.bybit.com',
-        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36',
-        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="143", "Google Chrome";v="143"',
+        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"macOS"',
         'sec-fetch-dest': 'empty',
         'sec-fetch-mode': 'cors',
         'sec-fetch-site': 'same-origin',
+        'origin': 'https://www.bybit.com',
+        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
         'traceparent': generateTraceparent(),
         ...extraHeaders
     };
@@ -48,18 +36,29 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
         headers['Cookie'] = cookieString;
     }
 
-    const options = {
+    const fetchOptions = {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
     };
 
+    // Если указан прокси, создаём агент
     if (proxy) {
-        const proxyAgent = new HttpsProxyAgent(`http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`);
-        options.agent = proxyAgent;
+        // Ожидаемый формат: host:port или host:port:user:pass
+        let proxyUrl;
+        const parts = proxy.split(':');
+        if (parts.length === 2) {
+            proxyUrl = `http://${parts[0]}:${parts[1]}`;
+        } else if (parts.length === 4) {
+            proxyUrl = `http://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
+        } else {
+            proxyUrl = `http://${proxy}`; // на всякий случай
+        }
+        const agent = new HttpsProxyAgent(proxyUrl);
+        fetchOptions.agent = agent;
     }
 
-    const response = await fetch(url, options);
+    const response = await fetch(url, fetchOptions);
     const text = await response.text();
     let data;
     try {
@@ -86,12 +85,13 @@ app.post('/get-token', async (req, res) => {
     try {
         addLog('📥 Request received');
         addLog(`Cookies type: ${typeof cookies}`);
+        addLog(`Proxy: ${proxy ? 'provided' : 'not provided'}`);
 
         if (!cookies || !url) {
             return res.status(400).json({ error: 'Missing cookies or url', log });
         }
 
-        // Преобразуем куки в строку (если массив)
+        // Преобразуем куки в строку
         let cookieString = '';
         if (Array.isArray(cookies)) {
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -101,13 +101,6 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
         addLog(`Cookie string length: ${cookieString.length}`);
-
-        // Парсим прокси, если передан
-        let proxyParsed = null;
-        if (proxy) {
-            proxyParsed = parseProxyString(proxy);
-            addLog(`Proxy parsed: ${proxyParsed ? 'yes' : 'no'}`);
-        }
 
         // --- ШАГ 1: Получаем список наград (если не передан awardId) ---
         let targetAwardId = awardId;
@@ -134,7 +127,7 @@ app.post('/get-token', async (req, res) => {
                 'POST',
                 listBody,
                 cookieString,
-                proxyParsed
+                proxy
             );
             addLog(`List status: ${listRes.status}`);
             addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 500)}`);
@@ -159,7 +152,7 @@ app.post('/get-token', async (req, res) => {
             addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
         }
 
-        // --- ШАГ 2: Запрос на получение награды (получаем risk_token) ---
+        // --- ШАГ 2: Запрос на получение награды ---
         addLog('Fetching award...');
         const awardBody = {
             awardID: targetAwardId,
@@ -171,7 +164,7 @@ app.post('/get-token', async (req, res) => {
             'POST',
             awardBody,
             cookieString,
-            proxyParsed
+            proxy
         );
         addLog(`Award status: ${awardRes.status}`);
         addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 500)}`);
@@ -186,7 +179,7 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
 
-        // --- ШАГ 3: Запрос face token (получаем финальную ссылку) ---
+        // --- ШАГ 3: Запрос face token ---
         addLog('Fetching face token...');
         const faceBody = { risk_token: riskToken };
         const faceRes = await makeRequest(
@@ -194,7 +187,7 @@ app.post('/get-token', async (req, res) => {
             'POST',
             faceBody,
             cookieString,
-            proxyParsed,
+            proxy,
             { 'platform': 'pc' }
         );
         addLog(`Face token status: ${faceRes.status}`);
