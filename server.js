@@ -1,36 +1,15 @@
 const express = require('express');
 const fetch = require('node-fetch');
-const { HttpsProxyAgent } = require('https-proxy-agent'); // <-- ИСПРАВЛЕНО
 const app = express();
 
 app.use(express.json());
 
-// Генерация traceparent (стандарт W3C)
-function generateTraceparent() {
-    const version = '00';
-    const traceId = require('crypto').randomBytes(16).toString('hex');
-    const parentId = require('crypto').randomBytes(8).toString('hex');
-    const flags = '01';
-    return `${version}-${traceId}-${parentId}-${flags}`;
-}
-
-// Функция для выполнения запроса с поддержкой прокси
-async function makeRequest(url, method, body = null, cookieString = '', proxy = null, extraHeaders = {}) {
+// Вспомогательная функция для выполнения запроса (без прокси)
+async function makeRequest(url, method, body = null, cookieString = '') {
     const headers = {
         'accept': 'application/json, text/plain, */*',
-        'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
         'content-type': 'application/json',
-        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'origin': 'https://www.bybit.com',
-        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        'traceparent': generateTraceparent(),
-        ...extraHeaders
+        'referer': 'https://www.bybit.com/en/task-center/my_rewards'
     };
     if (cookieString) {
         headers['Cookie'] = cookieString;
@@ -39,23 +18,8 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
     const fetchOptions = {
         method,
         headers,
-        body: body ? JSON.stringify(body) : undefined,
+        body: body ? JSON.stringify(body) : undefined
     };
-
-    // Если указан прокси, создаём агент
-    if (proxy) {
-        let proxyUrl;
-        const parts = proxy.split(':');
-        if (parts.length === 2) {
-            proxyUrl = `http://${parts[0]}:${parts[1]}`;
-        } else if (parts.length === 4) {
-            proxyUrl = `http://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
-        } else {
-            proxyUrl = `http://${proxy}`;
-        }
-        const agent = new HttpsProxyAgent(proxyUrl); // теперь работает
-        fetchOptions.agent = agent;
-    }
 
     const response = await fetch(url, fetchOptions);
     const text = await response.text();
@@ -63,7 +27,7 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
     try {
         data = JSON.parse(text);
     } catch {
-        data = { raw: text.substring(0, 500) };
+        data = { raw: text.substring(0, 1000) }; // увеличил до 1000 символов для отладки
     }
     return {
         status: response.status,
@@ -73,7 +37,7 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
 }
 
 app.post('/get-token', async (req, res) => {
-    const { cookies, proxy, url, awardId, specCode } = req.body;
+    const { cookies, url, awardId, specCode } = req.body;
     const log = [];
 
     const addLog = (msg) => {
@@ -84,12 +48,12 @@ app.post('/get-token', async (req, res) => {
     try {
         addLog('📥 Request received');
         addLog(`Cookies type: ${typeof cookies}`);
-        addLog(`Proxy: ${proxy ? 'provided' : 'not provided'}`);
 
         if (!cookies || !url) {
             return res.status(400).json({ error: 'Missing cookies or url', log });
         }
 
+        // Преобразуем куки в строку
         let cookieString = '';
         if (Array.isArray(cookies)) {
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -99,7 +63,11 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
         addLog(`Cookie string length: ${cookieString.length}`);
+        // Логируем первые несколько кук для проверки
+        const cookieSample = cookieString.split(';').slice(0, 3).join('; ');
+        addLog(`Cookie sample: ${cookieSample}...`);
 
+        // --- ШАГ 1: Получаем список наград (если не передан awardId) ---
         let targetAwardId = awardId;
         let targetSpecCode = specCode || '';
 
@@ -123,16 +91,16 @@ app.post('/get-token', async (req, res) => {
                 'https://www.bybit.com/x-api/segw/awar/v1/awarding/search-together',
                 'POST',
                 listBody,
-                cookieString,
-                proxy
+                cookieString
             );
             addLog(`List status: ${listRes.status}`);
-            addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 500)}`);
+            addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 1000)}`);
 
             if (listRes.status !== 200) {
                 return res.status(500).json({ error: 'List fetch failed', details: listRes.data, log });
             }
 
+            // Проверяем код возврата Bybit
             if (listRes.data.ret_code !== undefined && listRes.data.ret_code !== 0) {
                 return res.status(500).json({ error: `Bybit error: ${listRes.data.ret_msg}`, details: listRes.data, log });
             }
@@ -149,6 +117,7 @@ app.post('/get-token', async (req, res) => {
             addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
         }
 
+        // --- ШАГ 2: Запрос на получение награды ---
         addLog('Fetching award...');
         const awardBody = {
             awardID: targetAwardId,
@@ -159,11 +128,10 @@ app.post('/get-token', async (req, res) => {
             'https://www.bybit.com/x-api/segw/awar/v1/awarding',
             'POST',
             awardBody,
-            cookieString,
-            proxy
+            cookieString
         );
         addLog(`Award status: ${awardRes.status}`);
-        addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 500)}`);
+        addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 1000)}`);
 
         if (awardRes.status !== 200) {
             return res.status(500).json({ error: 'Award fetch failed', details: awardRes.data, log });
@@ -175,18 +143,17 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
 
+        // --- ШАГ 3: Запрос face token ---
         addLog('Fetching face token...');
         const faceBody = { risk_token: riskToken };
         const faceRes = await makeRequest(
             'https://www.bybit.com/x-api/user/public/risk/face/token',
             'POST',
             faceBody,
-            cookieString,
-            proxy,
-            { 'platform': 'pc' }
+            cookieString
         );
         addLog(`Face token status: ${faceRes.status}`);
-        addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 500)}`);
+        addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
 
         if (faceRes.status !== 200) {
             return res.status(500).json({ error: 'Face token fetch failed', details: faceRes.data, log });
