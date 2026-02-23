@@ -4,30 +4,12 @@ const app = express();
 
 app.use(express.json());
 
-function generateTraceparent() {
-    const version = '00';
-    const traceId = require('crypto').randomBytes(16).toString('hex');
-    const parentId = require('crypto').randomBytes(8).toString('hex');
-    const flags = '01';
-    return `${version}-${traceId}-${parentId}-${flags}`;
-}
-
-async function makeRequest(url, method, body = null, cookieString = '', extraHeaders = {}) {
+async function makeRequest(url, method, body = null, cookieString = '') {
+    // Только самые необходимые заголовки (как в консоли)
     const headers = {
         'accept': 'application/json, text/plain, */*',
-        'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
         'content-type': 'application/json',
-        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'origin': 'https://www.bybit.com',
-        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        'traceparent': generateTraceparent(),
-        ...extraHeaders
+        'referer': 'https://www.bybit.com/en/task-center/my_rewards'
     };
     if (cookieString) {
         headers['Cookie'] = cookieString;
@@ -38,6 +20,7 @@ async function makeRequest(url, method, body = null, cookieString = '', extraHea
         headers,
         body: body ? JSON.stringify(body) : undefined
     });
+
     const text = await response.text();
     let data;
     try {
@@ -79,7 +62,7 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Cookie string length: ${cookieString.length}`);
         if (cookieString.includes('secure-token=')) {
-            addLog('✅ secure-token found in cookies');
+            addLog('✅ secure-token found');
         } else {
             addLog('❌ secure-token NOT found');
         }
@@ -147,8 +130,9 @@ app.post('/get-token', async (req, res) => {
         addLog(`Award status: ${awardRes.status}`);
         addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 1000)}`);
 
-        if (awardRes.status !== 200) {
-            return res.status(500).json({ error: 'Award fetch failed', details: awardRes.data, log });
+        // Проверяем бизнес-ошибку
+        if (awardRes.data.retCode !== undefined && awardRes.data.retCode !== 0) {
+            return res.status(500).json({ error: `Bybit error: ${awardRes.data.retMsg}`, details: awardRes.data, log });
         }
 
         const riskToken = awardRes.data?.result?.risk_token || awardRes.data?.risk_token;
@@ -163,14 +147,13 @@ app.post('/get-token', async (req, res) => {
             'https://www.bybit.com/x-api/user/public/risk/face/token',
             'POST',
             faceBody,
-            cookieString,
-            { 'platform': 'pc' }
+            cookieString
         );
         addLog(`Face token status: ${faceRes.status}`);
         addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
 
-        if (faceRes.status !== 200) {
-            return res.status(500).json({ error: 'Face token fetch failed', details: faceRes.data, log });
+        if (faceRes.data.retCode !== undefined && faceRes.data.retCode !== 0) {
+            return res.status(500).json({ error: `Bybit error: ${faceRes.data.retMsg}`, details: faceRes.data, log });
         }
 
         const finalUrl = faceRes.data?.result?.token_info?.token;
