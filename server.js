@@ -1,56 +1,8 @@
 const express = require('express');
-const fetch = require('node-fetch');
+const puppeteer = require('puppeteer');
 const app = express();
 
 app.use(express.json());
-
-function generateTraceparent() {
-    const version = '00';
-    const traceId = require('crypto').randomBytes(16).toString('hex');
-    const parentId = require('crypto').randomBytes(8).toString('hex');
-    const flags = '01';
-    return `${version}-${traceId}-${parentId}-${flags}`;
-}
-
-async function makeRequest(url, method, body = null, cookieString = '', extraHeaders = {}) {
-    const headers = {
-        'accept': 'application/json, text/plain, */*',
-        'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
-        'content-type': 'application/json',
-        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'origin': 'https://www.bybit.com',
-        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        'traceparent': generateTraceparent(),
-        ...extraHeaders
-    };
-    if (cookieString) {
-        headers['Cookie'] = cookieString;
-    }
-
-    const response = await fetch(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined
-    });
-    const text = await response.text();
-    let data;
-    try {
-        data = JSON.parse(text);
-    } catch {
-        data = { raw: text.substring(0, 1000) };
-    }
-    return {
-        status: response.status,
-        headers: Object.fromEntries(response.headers),
-        data
-    };
-}
 
 app.post('/get-token', async (req, res) => {
     const { cookies, url, awardId, specCode } = req.body;
@@ -61,6 +13,7 @@ app.post('/get-token', async (req, res) => {
         log.push(msg);
     };
 
+    let browser = null;
     try {
         addLog('📥 Request received');
         addLog(`Cookies type: ${typeof cookies}`);
@@ -69,123 +22,150 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Missing cookies or url', log });
         }
 
-        let cookieString = '';
-        if (Array.isArray(cookies)) {
-            cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-        } else if (typeof cookies === 'string') {
-            cookieString = cookies;
-        } else {
+        // Преобразуем куки в массив объектов (если пришли строкой)
+        let cookieArray = cookies;
+        if (typeof cookies === 'string') {
+            // Пример: "name1=value1; name2=value2"
+            cookieArray = cookies.split(';').map(pair => {
+                const [name, value] = pair.trim().split('=');
+                return { name, value, domain: '.bybit.com', path: '/' };
+            }).filter(c => c.name && c.value);
+            addLog(`Parsed ${cookieArray.length} cookies from string`);
+        } else if (!Array.isArray(cookies)) {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
-        addLog(`Cookie string length: ${cookieString.length}`);
-        if (cookieString.includes('secure-token=')) {
-            addLog('✅ secure-token found');
-        } else {
-            addLog('❌ secure-token NOT found');
-        }
 
-        let targetAwardId = awardId;
-        let targetSpecCode = specCode !== undefined ? specCode : null;
+        // Запускаем браузер
+        addLog('🚀 Launching browser...');
+        browser = await puppeteer.launch({
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            headless: true,
+            defaultViewport: null
+        });
+        addLog('✅ Browser launched');
 
-        if (!targetAwardId) {
-            addLog('No awardId, fetching list...');
-            const listBody = {
-                pagination: { pageNum: 1, pageSize: 12 },
-                filter: {
-                    awardType: 'AWARD_TYPE_UNKNOWN',
-                    newOrderWay: true,
-                    rewardStatus: 'REWARD_STATUS_DEFAULT',
-                    getFirstAwardings: false,
-                    simpleField: true,
-                    allow_amount_multiple: true,
-                    return_reward_packet: true,
-                    return_transfer_award: true
+        const page = await browser.newPage();
+
+        // Устанавливаем куки (только для домена bybit.com)
+        const bybitCookies = cookieArray.filter(c => 
+            c.domain?.includes('bybit.com') || c.domain?.includes('bytick.com') || !c.domain
+        );
+        addLog(`🍪 Setting ${bybitCookies.length} cookies (filtered from ${cookieArray.length})`);
+        await page.setCookie(...bybitCookies);
+
+        // Переходим на страницу наград (нужен для контекста)
+        addLog(`🌍 Navigating to ${url}`);
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        addLog('✅ Page loaded');
+
+        // Выполняем цепочку запросов внутри страницы
+        addLog('⚙️ Executing page.evaluate...');
+        const result = await page.evaluate(async (targetAwardId, targetSpecCode) => {
+            const log = (msg) => console.log(`[Evaluate] ${msg}`);
+
+            try {
+                // --- ШАГ 1: Получаем список наград, если не передан awardId ---
+                let awardId = targetAwardId;
+                let specCode = targetSpecCode;
+
+                if (!awardId) {
+                    log('No awardId, fetching list...');
+                    const listRes = await fetch('https://www.bybit.com/x-api/segw/awar/v1/awarding/search-together', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({
+                            pagination: { pageNum: 1, pageSize: 12 },
+                            filter: {
+                                awardType: 'AWARD_TYPE_UNKNOWN',
+                                newOrderWay: true,
+                                rewardStatus: 'REWARD_STATUS_DEFAULT',
+                                getFirstAwardings: false,
+                                simpleField: true,
+                                allow_amount_multiple: true,
+                                return_reward_packet: true,
+                                return_transfer_award: true
+                            }
+                        }),
+                        credentials: 'include'
+                    });
+                    const listData = await listRes.json();
+                    log(`List status: ${listRes.status}`);
+                    if (!listData.result?.awardings?.length) {
+                        throw new Error('No awards found');
+                    }
+                    awardId = listData.result.awardings[0].award_detail.id;
+                    specCode = listData.result.awardings[0].spec_code || null;
+                    log(`Selected awardId: ${awardId}, specCode: ${specCode}`);
+                } else {
+                    log(`Using provided awardId: ${awardId}, specCode: ${specCode}`);
                 }
-            };
-            const listRes = await makeRequest(
-                'https://www.bybit.com/x-api/segw/awar/v1/awarding/search-together',
-                'POST',
-                listBody,
-                cookieString
-            );
-            addLog(`List status: ${listRes.status}`);
-            addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 1000)}`);
 
-            if (listRes.status !== 200) {
-                return res.status(500).json({ error: 'List fetch failed', details: listRes.data, log });
-            }
-            if (listRes.data.ret_code !== undefined && listRes.data.ret_code !== 0) {
-                return res.status(500).json({ error: `Bybit error: ${listRes.data.ret_msg}`, details: listRes.data, log });
-            }
+                // --- ШАГ 2: Запрос на получение награды ---
+                log('Fetching award...');
+                const awardRes = await fetch('https://www.bybit.com/x-api/segw/awar/v1/awarding', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({
+                        awardID: awardId,
+                        spec_code: specCode,
+                        is_reward_hub: true
+                    }),
+                    credentials: 'include'
+                });
+                const awardData = await awardRes.json();
+                log(`Award status: ${awardRes.status}`);
+                log(`Award response: ${JSON.stringify(awardData).substring(0, 200)}`);
 
-            const awards = listRes.data?.result?.awardings;
-            if (!awards || awards.length === 0) {
-                addLog('No awards found in response');
-                return res.status(404).json({ error: 'No awards found', response: listRes.data, log });
-            }
+                const riskToken = awardData?.result?.risk_token || awardData?.risk_token;
+                if (!riskToken) {
+                    throw new Error('No risk token in award response');
+                }
 
-            const firstAward = awards[0];
-            targetAwardId = firstAward.award_detail.id;
-            targetSpecCode = firstAward.spec_code || null;
-            addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
+                // --- ШАГ 3: Запрос face token ---
+                log('Fetching face token...');
+                const faceRes = await fetch('https://www.bybit.com/x-api/user/public/risk/face/token', {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json;charset=UTF-8',
+                        'platform': 'pc'
+                    },
+                    body: JSON.stringify({ risk_token: riskToken }),
+                    credentials: 'include'
+                });
+                const faceData = await faceRes.json();
+                log(`Face token status: ${faceRes.status}`);
+                log(`Face token response: ${JSON.stringify(faceData).substring(0, 200)}`);
+
+                const finalUrl = faceData?.result?.token_info?.token;
+                if (!finalUrl) {
+                    throw new Error('No final URL in face token response');
+                }
+
+                log('✅ Final URL obtained');
+                return finalUrl;
+            } catch (e) {
+                log(`Critical error: ${e}`);
+                return { error: e.toString() };
+            }
+        }, awardId || null, specCode !== undefined ? specCode : null);
+
+        await browser.close();
+        addLog('🔒 Browser closed');
+
+        if (result && result.error) {
+            addLog('❌ Error from evaluate: ' + result.error);
+            res.status(500).json({ error: result.error, log });
+        } else if (result) {
+            addLog('🎉 Final URL: ' + result.substring(0, 50) + '...');
+            res.json({ success: true, url: result, log });
         } else {
-            addLog(`Using provided awardId: ${targetAwardId}, specCode: ${targetSpecCode === null ? 'null' : targetSpecCode}`);
+            addLog('❌ No result');
+            res.status(500).json({ error: 'Failed to get URL', log });
         }
-
-        addLog('Fetching award...');
-        const awardBody = {
-            awardID: targetAwardId,
-            spec_code: targetSpecCode,
-            is_reward_hub: true
-        };
-        const awardRes = await makeRequest(
-            'https://www.bybit.com/x-api/segw/awar/v1/awarding',
-            'POST',
-            awardBody,
-            cookieString
-        );
-        addLog(`Award status: ${awardRes.status}`);
-        addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 1000)}`);
-
-        // Проверяем код возврата (может быть 409015)
-        const retCode = awardRes.data.retCode !== undefined ? awardRes.data.retCode : awardRes.data.ret_code;
-        if (retCode !== undefined && retCode !== 0 && retCode !== 409015) {
-            return res.status(500).json({ error: `Bybit error: ${awardRes.data.retMsg || awardRes.data.ret_msg}`, details: awardRes.data, log });
-        }
-
-        const riskToken = awardRes.data?.result?.risk_token || awardRes.data?.risk_token;
-        if (!riskToken) {
-            return res.status(500).json({ error: 'No risk_token in award response', response: awardRes.data, log });
-        }
-        addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
-
-        addLog('Fetching face token...');
-        const faceBody = { risk_token: riskToken };
-        const faceRes = await makeRequest(
-            'https://www.bybit.com/x-api/user/public/risk/face/token',
-            'POST',
-            faceBody,
-            cookieString,
-            { 'platform': 'pc' }
-        );
-        addLog(`Face token status: ${faceRes.status}`);
-        addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
-
-        const faceRetCode = faceRes.data.retCode !== undefined ? faceRes.data.retCode : faceRes.data.ret_code;
-        if (faceRetCode !== undefined && faceRetCode !== 0) {
-            return res.status(500).json({ error: `Bybit error: ${faceRes.data.retMsg || faceRes.data.ret_msg}`, details: faceRes.data, log });
-        }
-
-        const finalUrl = faceRes.data?.result?.token_info?.token;
-        if (!finalUrl) {
-            return res.status(500).json({ error: 'No final URL in face token response', response: faceRes.data, log });
-        }
-
-        addLog('✅ Final URL obtained');
-        res.json({ success: true, url: finalUrl, log });
 
     } catch (error) {
         addLog('💥 Fatal error: ' + error.toString());
+        if (browser) await browser.close();
         res.status(500).json({ error: error.message, log });
     }
 });
