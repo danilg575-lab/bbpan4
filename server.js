@@ -37,12 +37,16 @@ app.post('/get-token', async (req, res) => {
 
         // Запускаем браузер
         addLog('🚀 Launching browser...');
-        browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            headless: true,
-            defaultViewport: null
-        });
-        addLog('✅ Browser launched');
+browser = await puppeteer.launch({
+    args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-http2' // отключаем HTTP/2
+    ],
+    headless: true,
+    defaultViewport: null
+});
+addLog('✅ Browser launched');
 
         const page = await browser.newPage();
 
