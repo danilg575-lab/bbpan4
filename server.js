@@ -1,6 +1,6 @@
 const express = require('express');
 const fetch = require('node-fetch');
-const HttpsProxyAgent = require('https-proxy-agent');
+const { HttpsProxyAgent } = require('https-proxy-agent'); // <-- ИСПРАВЛЕНО
 const app = express();
 
 app.use(express.json());
@@ -44,7 +44,6 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
 
     // Если указан прокси, создаём агент
     if (proxy) {
-        // Ожидаемый формат: host:port или host:port:user:pass
         let proxyUrl;
         const parts = proxy.split(':');
         if (parts.length === 2) {
@@ -52,9 +51,9 @@ async function makeRequest(url, method, body = null, cookieString = '', proxy = 
         } else if (parts.length === 4) {
             proxyUrl = `http://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
         } else {
-            proxyUrl = `http://${proxy}`; // на всякий случай
+            proxyUrl = `http://${proxy}`;
         }
-        const agent = new HttpsProxyAgent(proxyUrl);
+        const agent = new HttpsProxyAgent(proxyUrl); // теперь работает
         fetchOptions.agent = agent;
     }
 
@@ -91,7 +90,6 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Missing cookies or url', log });
         }
 
-        // Преобразуем куки в строку
         let cookieString = '';
         if (Array.isArray(cookies)) {
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -102,7 +100,6 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Cookie string length: ${cookieString.length}`);
 
-        // --- ШАГ 1: Получаем список наград (если не передан awardId) ---
         let targetAwardId = awardId;
         let targetSpecCode = specCode || '';
 
@@ -152,7 +149,6 @@ app.post('/get-token', async (req, res) => {
             addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
         }
 
-        // --- ШАГ 2: Запрос на получение награды ---
         addLog('Fetching award...');
         const awardBody = {
             awardID: targetAwardId,
@@ -179,7 +175,6 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
 
-        // --- ШАГ 3: Запрос face token ---
         addLog('Fetching face token...');
         const faceBody = { risk_token: riskToken };
         const faceRes = await makeRequest(
