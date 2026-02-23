@@ -4,30 +4,48 @@ const app = express();
 
 app.use(express.json());
 
-// Вспомогательная функция для выполнения запроса (без прокси)
-async function makeRequest(url, method, body = null, cookieString = '') {
+// Генерация traceparent (стандарт W3C)
+function generateTraceparent() {
+    const version = '00';
+    const traceId = require('crypto').randomBytes(16).toString('hex');
+    const parentId = require('crypto').randomBytes(8).toString('hex');
+    const flags = '01';
+    return `${version}-${traceId}-${parentId}-${flags}`;
+}
+
+async function makeRequest(url, method, body = null, cookieString = '', extraHeaders = {}) {
     const headers = {
         'accept': 'application/json, text/plain, */*',
+        'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
         'content-type': 'application/json',
-        'referer': 'https://www.bybit.com/en/task-center/my_rewards'
+        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'origin': 'https://www.bybit.com',
+        'referer': 'https://www.bybit.com/en/task-center/my_rewards',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+        'traceparent': generateTraceparent(),
+        ...extraHeaders
     };
     if (cookieString) {
         headers['Cookie'] = cookieString;
     }
 
-    const fetchOptions = {
+    const response = await fetch(url, {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined
-    };
+    });
 
-    const response = await fetch(url, fetchOptions);
     const text = await response.text();
     let data;
     try {
         data = JSON.parse(text);
     } catch {
-        data = { raw: text.substring(0, 1000) }; // увеличил до 1000 символов для отладки
+        data = { raw: text.substring(0, 1000) };
     }
     return {
         status: response.status,
@@ -63,11 +81,14 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
         addLog(`Cookie string length: ${cookieString.length}`);
-        // Логируем первые несколько кук для проверки
-        const cookieSample = cookieString.split(';').slice(0, 3).join('; ');
-        addLog(`Cookie sample: ${cookieSample}...`);
+        // Логируем наличие secure-token (важно!)
+        if (cookieString.includes('secure-token=')) {
+            addLog('✅ secure-token found in cookies');
+        } else {
+            addLog('❌ secure-token NOT found in cookies');
+        }
 
-        // --- ШАГ 1: Получаем список наград (если не передан awardId) ---
+        // --- ШАГ 1: Получаем список наград, если не передан awardId ---
         let targetAwardId = awardId;
         let targetSpecCode = specCode || '';
 
@@ -100,7 +121,6 @@ app.post('/get-token', async (req, res) => {
                 return res.status(500).json({ error: 'List fetch failed', details: listRes.data, log });
             }
 
-            // Проверяем код возврата Bybit
             if (listRes.data.ret_code !== undefined && listRes.data.ret_code !== 0) {
                 return res.status(500).json({ error: `Bybit error: ${listRes.data.ret_msg}`, details: listRes.data, log });
             }
@@ -108,6 +128,7 @@ app.post('/get-token', async (req, res) => {
             const awards = listRes.data?.result?.awardings;
             if (!awards || awards.length === 0) {
                 addLog('No awards found in response');
+                // Если наград нет, можно вернуть ошибку или попытаться использовать переданный awardId
                 return res.status(404).json({ error: 'No awards found', response: listRes.data, log });
             }
 
@@ -115,6 +136,8 @@ app.post('/get-token', async (req, res) => {
             targetAwardId = firstAward.award_detail.id;
             targetSpecCode = firstAward.spec_code || '';
             addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
+        } else {
+            addLog(`Using provided awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
         }
 
         // --- ШАГ 2: Запрос на получение награды ---
@@ -150,7 +173,8 @@ app.post('/get-token', async (req, res) => {
             'https://www.bybit.com/x-api/user/public/risk/face/token',
             'POST',
             faceBody,
-            cookieString
+            cookieString,
+            { 'platform': 'pc' } // дополнительный заголовок
         );
         addLog(`Face token status: ${faceRes.status}`);
         addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
