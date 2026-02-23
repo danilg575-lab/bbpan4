@@ -4,7 +4,7 @@ const app = express();
 
 app.use(express.json());
 
-// Минимальные, но достаточные заголовки (как в консоли)
+// Минимальные, но достаточные заголвки (как в консоли)
 async function makeRequest(url, method, body = null, cookieString = '', extraHeaders = {}) {
     const headers = {
         'accept': 'application/json, text/plain, */*',
