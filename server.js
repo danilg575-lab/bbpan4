@@ -4,7 +4,6 @@ const app = express();
 
 app.use(express.json());
 
-// Генерация traceparent (стандарт W3C)
 function generateTraceparent() {
     const version = '00';
     const traceId = require('crypto').randomBytes(16).toString('hex');
@@ -39,7 +38,6 @@ async function makeRequest(url, method, body = null, cookieString = '', extraHea
         headers,
         body: body ? JSON.stringify(body) : undefined
     });
-
     const text = await response.text();
     let data;
     try {
@@ -71,7 +69,6 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Missing cookies or url', log });
         }
 
-        // Преобразуем куки в строку
         let cookieString = '';
         if (Array.isArray(cookies)) {
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -81,16 +78,14 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
         addLog(`Cookie string length: ${cookieString.length}`);
-        // Логируем наличие secure-token (важно!)
         if (cookieString.includes('secure-token=')) {
             addLog('✅ secure-token found in cookies');
         } else {
-            addLog('❌ secure-token NOT found in cookies');
+            addLog('❌ secure-token NOT found');
         }
 
-        // --- ШАГ 1: Получаем список наград, если не передан awardId ---
         let targetAwardId = awardId;
-        let targetSpecCode = specCode || '';
+        let targetSpecCode = specCode !== undefined ? specCode : null;
 
         if (!targetAwardId) {
             addLog('No awardId, fetching list...');
@@ -99,7 +94,6 @@ app.post('/get-token', async (req, res) => {
                 filter: {
                     awardType: 'AWARD_TYPE_UNKNOWN',
                     newOrderWay: true,
-                    rewardBusinessLine: 'REWARD_BUSINESS_LINE_DEFAULT',
                     rewardStatus: 'REWARD_STATUS_DEFAULT',
                     getFirstAwardings: false,
                     simpleField: true,
@@ -120,7 +114,6 @@ app.post('/get-token', async (req, res) => {
             if (listRes.status !== 200) {
                 return res.status(500).json({ error: 'List fetch failed', details: listRes.data, log });
             }
-
             if (listRes.data.ret_code !== undefined && listRes.data.ret_code !== 0) {
                 return res.status(500).json({ error: `Bybit error: ${listRes.data.ret_msg}`, details: listRes.data, log });
             }
@@ -128,19 +121,17 @@ app.post('/get-token', async (req, res) => {
             const awards = listRes.data?.result?.awardings;
             if (!awards || awards.length === 0) {
                 addLog('No awards found in response');
-                // Если наград нет, можно вернуть ошибку или попытаться использовать переданный awardId
                 return res.status(404).json({ error: 'No awards found', response: listRes.data, log });
             }
 
             const firstAward = awards[0];
             targetAwardId = firstAward.award_detail.id;
-            targetSpecCode = firstAward.spec_code || '';
+            targetSpecCode = firstAward.spec_code || null;
             addLog(`Selected awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
         } else {
-            addLog(`Using provided awardId: ${targetAwardId}, specCode: ${targetSpecCode}`);
+            addLog(`Using provided awardId: ${targetAwardId}, specCode: ${targetSpecCode === null ? 'null' : targetSpecCode}`);
         }
 
-        // --- ШАГ 2: Запрос на получение награды ---
         addLog('Fetching award...');
         const awardBody = {
             awardID: targetAwardId,
@@ -166,7 +157,6 @@ app.post('/get-token', async (req, res) => {
         }
         addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
 
-        // --- ШАГ 3: Запрос face token ---
         addLog('Fetching face token...');
         const faceBody = { risk_token: riskToken };
         const faceRes = await makeRequest(
@@ -174,7 +164,7 @@ app.post('/get-token', async (req, res) => {
             'POST',
             faceBody,
             cookieString,
-            { 'platform': 'pc' } // дополнительный заголовок
+            { 'platform': 'pc' }
         );
         addLog(`Face token status: ${faceRes.status}`);
         addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
