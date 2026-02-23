@@ -4,12 +4,31 @@ const app = express();
 
 app.use(express.json());
 
-// Минимальные, но достаточные заголвки (как в консоли)
+// Генерация traceparent (стандарт W3C)
+function generateTraceparent() {
+    const version = '00';
+    const traceId = require('crypto').randomBytes(16).toString('hex');
+    const parentId = require('crypto').randomBytes(8).toString('hex');
+    const flags = '01';
+    return `${version}-${traceId}-${parentId}-${flags}`;
+}
+
 async function makeRequest(url, method, body = null, cookieString = '', extraHeaders = {}) {
+    // Полные заголовки, как в вашем HAR
     const headers = {
         'accept': 'application/json, text/plain, */*',
+        'accept-language': 'es-VE,es;q=0.9,en-US;q=0.8,en;q=0.7,es-MX;q=0.6',
         'content-type': 'application/json',
+        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'origin': 'https://www.bybit.com',
         'referer': 'https://www.bybit.com/en/task-center/my_rewards',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+        'traceparent': generateTraceparent(),
         ...extraHeaders
     };
     if (cookieString) {
@@ -21,16 +40,16 @@ async function makeRequest(url, method, body = null, cookieString = '', extraHea
         headers,
         body: body ? JSON.stringify(body) : undefined
     });
-
     const text = await response.text();
     let data;
     try {
         data = JSON.parse(text);
     } catch {
-        data = { raw: text.substring(0, 500) };
+        data = { raw: text.substring(0, 1000) };
     }
     return {
         status: response.status,
+        headers: Object.fromEntries(response.headers),
         data
     };
 }
@@ -62,6 +81,11 @@ app.post('/get-token', async (req, res) => {
             return res.status(400).json({ error: 'Invalid cookies format', log });
         }
         addLog(`Cookie string length: ${cookieString.length}`);
+        if (cookieString.includes('secure-token=')) {
+            addLog('✅ secure-token found');
+        } else {
+            addLog('❌ secure-token NOT found');
+        }
 
         // --- ШАГ 1: Получаем список наград (если не передан awardId) ---
         let targetAwardId = awardId;
@@ -89,7 +113,7 @@ app.post('/get-token', async (req, res) => {
                 cookieString
             );
             addLog(`List status: ${listRes.status}`);
-            addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 500)}`);
+            addLog(`List response preview: ${JSON.stringify(listRes.data).substring(0, 1000)}`);
 
             if (listRes.status !== 200) {
                 return res.status(500).json({ error: 'List fetch failed', details: listRes.data, log });
@@ -126,20 +150,21 @@ app.post('/get-token', async (req, res) => {
             cookieString
         );
         addLog(`Award status: ${awardRes.status}`);
-        addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 500)}`);
+        addLog(`Award response preview: ${JSON.stringify(awardRes.data).substring(0, 1000)}`);
 
-        if (awardRes.status !== 200) {
-            return res.status(500).json({ error: 'Award fetch failed', details: awardRes.data, log });
+        // Проверяем код возврата (может быть 409015 - это ок, там есть risk_token)
+        const awardRetCode = awardRes.data.retCode !== undefined ? awardRes.data.retCode : awardRes.data.ret_code;
+        if (awardRetCode !== undefined && awardRetCode !== 0 && awardRetCode !== 409015) {
+            return res.status(500).json({ error: `Bybit error: ${awardRes.data.retMsg || awardRes.data.ret_msg}`, details: awardRes.data, log });
         }
 
-        // Извлекаем risk_token (может быть в result.risk_token или на верхнем уровне)
         const riskToken = awardRes.data?.result?.risk_token || awardRes.data?.risk_token;
         if (!riskToken) {
             return res.status(500).json({ error: 'No risk_token in award response', response: awardRes.data, log });
         }
         addLog(`Risk token: ${riskToken.substring(0, 30)}...`);
 
-        // --- ШАГ 3: Запрос risk/components (ОБЯЗАТЕЛЬНЫЙ ПРОМЕЖУТОЧНЫЙ ШАГ) ---
+        // --- ШАГ 3: Запрос risk/components (НОВЫЙ) ---
         addLog('Fetching risk components...');
         const componentsBody = { risk_token: riskToken };
         const componentsRes = await makeRequest(
@@ -149,13 +174,11 @@ app.post('/get-token', async (req, res) => {
             cookieString
         );
         addLog(`Components status: ${componentsRes.status}`);
-        addLog(`Components response preview: ${JSON.stringify(componentsRes.data).substring(0, 500)}`);
+        addLog(`Components response preview: ${JSON.stringify(componentsRes.data).substring(0, 1000)}`);
 
-        if (componentsRes.status !== 200) {
-            return res.status(500).json({ error: 'Risk components fetch failed', details: componentsRes.data, log });
-        }
-        if (componentsRes.data.ret_code !== undefined && componentsRes.data.ret_code !== 0) {
-            return res.status(500).json({ error: `Risk components error: ${componentsRes.data.ret_msg}`, details: componentsRes.data, log });
+        const componentsRetCode = componentsRes.data.retCode !== undefined ? componentsRes.data.retCode : componentsRes.data.ret_code;
+        if (componentsRetCode !== undefined && componentsRetCode !== 0) {
+            return res.status(500).json({ error: `Risk components error: ${componentsRes.data.retMsg || componentsRes.data.ret_msg}`, details: componentsRes.data, log });
         }
 
         // --- ШАГ 4: Запрос face token (получаем финальную ссылку) ---
@@ -166,14 +189,11 @@ app.post('/get-token', async (req, res) => {
             'POST',
             faceBody,
             cookieString,
-            { 'platform': 'pc' } // важный заголовок
+            { 'platform': 'pc' } // обязательный заголовок
         );
         addLog(`Face token status: ${faceRes.status}`);
-        addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 500)}`);
+        addLog(`Face token response preview: ${JSON.stringify(faceRes.data).substring(0, 1000)}`);
 
-        if (faceRes.status !== 200) {
-            return res.status(500).json({ error: 'Face token fetch failed', details: faceRes.data, log });
-        }
         const faceRetCode = faceRes.data.retCode !== undefined ? faceRes.data.retCode : faceRes.data.ret_code;
         if (faceRetCode !== undefined && faceRetCode !== 0) {
             return res.status(500).json({ error: `Face token error: ${faceRes.data.retMsg || faceRes.data.ret_msg}`, details: faceRes.data, log });
